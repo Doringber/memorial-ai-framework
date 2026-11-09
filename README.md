@@ -13,6 +13,12 @@
 
 [**Why This Exists**](#why-standard-rag-fails-for-memorials) · [**Architecture**](#architecture) · [**Quick Start**](#quick-start-5-minutes) · [**Concrete Examples**](#concrete-examples) · [**Voice & Barge-In**](#voice-pipeline--barge-in-history) · [**Telegram Bot**](#telegram-bot-integration) · [**Evaluation & Golden Set**](#evaluation-harness--golden-set) · [**Ethics & Safety**](#ethical--safety-guardrails)
 
+<br/>
+
+<img src="docs/assets/telegram-demo.gif" alt="Telegram Memorial Bot Demo — Text, Inline Speak Button, and Voice Notes" width="420" />
+
+*100% synthetic demo persona ("סבא דוד") — showing `/start` AI disclosure, sharp WhatsApp-style replies, the inline `🔊 השמע בקול` button, and bidirectional voice notes ([Download MP4](docs/assets/telegram-demo.mp4)).*
+
 </div>
 
 ---
