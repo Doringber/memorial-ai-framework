@@ -1,0 +1,29 @@
+name: rony-local
+
+# Local smoke-test of the production stack against your local data.
+#   ENV_FILE=~/MemorialData/.env DATA_ROOT=~/MemorialData/data docker compose \
+#     -f infra/docker/docker-compose.prod.yml -f infra/docker/docker-compose.local.yml up --build
+# API on http://127.0.0.1:8080, web on http://127.0.0.1:3000 (this machine only). Caddy is skipped.
+
+services:
+  api:
+    ports:
+      - "127.0.0.1:8080:8000"
+    environment:
+      APP_ENV: development
+      CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    volumes:
+      - ~/.cache/huggingface:/opt/hf-cache
+
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: http://127.0.0.1:8080
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  caddy:
+    profiles: ["disabled"]

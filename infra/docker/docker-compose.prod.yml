@@ -1,0 +1,65 @@
+name: rony-prod
+
+# All persistent bot data (uploads, memories, personas, persons.json, chroma)
+# lives in one host directory so it can be seeded, inspected and backed up.
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-../../.env}
+    environment:
+      APP_ENV: production
+      DATA_DIR: /app/data
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      HF_HOME: /opt/hf-cache
+    volumes:
+      - ${DATA_ROOT:-/opt/rony-data}:/app/data
+      - hfcache:/opt/hf-cache
+    expose:
+      - "8000"
+    networks:
+      - web
+
+  web:
+    build:
+      context: ../../apps/web
+    restart: unless-stopped
+    expose:
+      - "3000"
+    depends_on:
+      - api
+    networks:
+      - web
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+      CADDY_EMAIL: ${CADDY_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - web
+    networks:
+      - web
+
+volumes:
+  hfcache:
+  caddy_data:
+  caddy_config:
+
+networks:
+  web:
+    driver: bridge

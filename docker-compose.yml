@@ -1,0 +1,38 @@
+# Local development with hot reload. Family data and .env live in ~/MemorialData
+# (outside the repo and any cloud-synced folder). Ollama runs on the host.
+#   docker compose up --build
+# API: http://127.0.0.1:8000   Web: http://127.0.0.1:3000  (this machine only)
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ~/MemorialData/.env
+    environment:
+      MEMORIAL_DATA_HOME: /askronny
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    volumes:
+      - ./apps/api:/app
+      - ~/MemorialData:/askronny
+      - ~/.cache/huggingface:/opt/hf-cache
+
+  web:
+    image: node:20-slim
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npx next dev -H 0.0.0.0"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api

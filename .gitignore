@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Environment / secrets
+.env
+.env.local
+infra/docker/.env
+
+# Private bot data (persona, memories, uploads, vectors, voice) — never commit
+apps/api/data/
+data/
+.backups/
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+.next/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Logs
+*.log
+
+# Docker
+docker-compose.override.yml

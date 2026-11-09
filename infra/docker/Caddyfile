@@ -1,0 +1,31 @@
+{
+    email {$CADDY_EMAIL}
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "microphone=(self), camera=(), geolocation=()"
+    }
+
+    request_body {
+        max_size 60MB
+    }
+
+    # The API enforces the family/admin access keys itself.
+    @api path /api/* /health
+    handle @api {
+        reverse_proxy api:8000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle {
+        reverse_proxy web:3000
+    }
+}
