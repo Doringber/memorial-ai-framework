@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -92,6 +93,18 @@ class Settings(BaseSettings):
     max_avatar_upload_mb: int = 10
     audio_retention_hours: int = 24
 
+    # Talking-head video (optional). Rendered by a separate local sidecar
+    # (apps/avatar-sidecar, AvatarForcing via avatarforcing-mlx) from the TTS
+    # audio + one portrait. The sidecar holds the portrait; this side only
+    # sends reply audio and gets an mp4 back. Must be loopback unless
+    # ALLOW_EXTERNAL_SERVICES=true, since reply audio is sent to it.
+    avatar_video_enabled: bool = False
+    avatar_service_url: str = "http://127.0.0.1:8090"
+    # Full pipeline (AvatarForcing + MuseTalk + GFPGAN) takes ~10 min per 27 s of audio.
+    avatar_video_timeout_s: int = 1200
+    # Longer replies are cut to this length before rendering (Telegram video notes cap at 60 s).
+    avatar_video_max_seconds: int = 30
+
     # Telegram Bot (optional — works via background long-polling or /api/telegram/webhook)
     telegram_bot_token: str = ""
     telegram_polling_enabled: bool = True
@@ -123,6 +136,10 @@ class Settings(BaseSettings):
                 (f"LLM_MODEL={self.llm_model}", is_ollama_cloud_model(self.llm_model)),
                 (f"TTS_PROVIDER={self.tts_provider}", not self.tts_allowed),
                 (f"EMBEDDING_PROVIDER={self.embedding_provider}", self.embedding_provider == "openai"),
+                (
+                    f"AVATAR_SERVICE_URL={self.avatar_service_url}",
+                    self.avatar_video_enabled and not is_local_service_url(self.avatar_service_url),
+                ),
             )
             if used
         ]
@@ -172,6 +189,10 @@ class Settings(BaseSettings):
         return self.data_dir / "audio_output"
 
     @property
+    def video_output_dir(self) -> Path:
+        return self.data_dir / "video_output"
+
+    @property
     def usage_dir(self) -> Path:
         return self.data_dir / "usage"
 
@@ -187,6 +208,17 @@ class Settings(BaseSettings):
 def is_ollama_cloud_model(model: str) -> bool:
     """Ollama ":cloud" / "-cloud" tags run on Ollama's servers, not locally."""
     return model.endswith(":cloud") or model.endswith("-cloud")
+
+
+# Hosts that stay on this machine. host.docker.internal is the Mac host as
+# seen from the API container (the avatar sidecar needs Apple Silicon, so it
+# always runs natively next to Docker).
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "host.docker.internal"})
+
+
+def is_local_service_url(url: str) -> bool:
+    """True if `url` points at this machine."""
+    return (urlparse(url).hostname or "").lower() in _LOCAL_HOSTS
 
 
 settings = Settings()

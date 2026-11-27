@@ -41,6 +41,9 @@ _LATENCY_KEYS = (
     "spoken_chars",
 )
 
+# Marks replies written by the safety system, not the persona (see telegram_bot: never voiced as video).
+SAFETY_NOTE = "This request was handled by the safety system."
+
 AI_DISCLAIMER = [
     "This is an AI-generated simulation based on archived materials.",
     "This response may be inaccurate and does not represent the real person.",
@@ -179,7 +182,7 @@ def chat_text(person_id: str, message: str, session_id: str | None = None) -> di
     safety = check_message(message)
     if safety:
         logger.warning("Safety '{}' triggered for session {}", safety.category, session_id)
-        return _result(safety.reply, session_id, ["This request was handled by the safety system."])
+        return _result(safety.reply, session_id, [SAFETY_NOTE])
 
     messages, citations, _ = _prepare_turn(person_id, message, session_id)
 
@@ -273,7 +276,7 @@ def stream_chat_text(
     safety = check_message(message)
     if safety:
         logger.warning("Safety '{}' triggered for session {}", safety.category, session_id)
-        notes = ["This request was handled by the safety system."]
+        notes = [SAFETY_NOTE]
         yield {"type": "meta", "session_id": session_id, "rag_ms": 0.0, "citations": [], "safety_notes": notes}
         yield {"type": "sentence", "index": 0, "text": safety.reply, "llm_ms": 0.0}
         yield {

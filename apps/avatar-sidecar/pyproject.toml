@@ -1,0 +1,17 @@
+[project]
+name = "avatar-sidecar"
+version = "0.1.0"
+description = "Local talking-head video renderer for the memorial AI framework (wraps avatarforcing-mlx)"
+requires-python = ">=3.11,<3.13"
+# avatarforcing-mlx and the AvatarForcing weights are CC BY-NC 4.0 (the FLOAT
+# motion autoencoder: CC BY-NC-ND 4.0) — non-commercial use only. They are
+# installed from their own repository and never vendored here.
+dependencies = [
+    "avatarforcing-mlx[crop] @ git+https://github.com/johnrobinsn/avatarforcing-mlx",
+]
+
+[tool.uv]
+package = false
+# Same override avatarforcing-mlx needs: transformers 4.30.2 pins tokenizers<0.14,
+# which has no Python 3.12 wheels; wav2vec2 doesn't use a tokenizer.
+override-dependencies = ["tokenizers; sys_platform == 'never'"]

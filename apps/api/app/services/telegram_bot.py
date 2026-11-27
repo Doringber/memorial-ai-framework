@@ -1,4 +1,4 @@
-"""Telegram Bot service — family authentication, text & voice note handling, webhook, and long-polling."""
+"""Telegram Bot service — family authentication, text, voice note & avatar video handling, webhook, and long-polling."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -16,7 +17,8 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.security import resolve_role
-from app.services.chat import chat_text
+from app.services.avatar_video import VideoUnavailableError, render_avatar_video, video_info
+from app.services.chat import SAFETY_NOTE, chat_text
 from app.services.stt import SpeechModelMissingError, transcribe_audio
 from app.services.tts import VoiceUnavailableError, synthesize_speech
 
@@ -24,17 +26,26 @@ _auth_lock = threading.Lock()
 _sessions_lock = threading.Lock()
 _chat_sessions: dict[int, str] = {}
 _voice_mode_chats: set[int] = set()
+_video_mode_chats: set[int] = set()
 _last_bot_reply: dict[int, str] = {}
+# One render at a time: the sidecar is sequential and local TTS engines aren't thread-safe.
+_video_lock = threading.Lock()
 _polling_stop = threading.Event()
 _polling_thread: threading.Thread | None = None
 
 _VOICE_CMD = re.compile(r"^/(?:voice|speak)(?:@\w+)?(?:\s+(.*))?$", re.DOTALL | re.IGNORECASE)
 _START_CMD = re.compile(r"^/start(?:@\w+)?(?:\s+(.*))?$", re.DOTALL | re.IGNORECASE)
 _NEW_CMD = re.compile(r"^/(?:new|reset)(?:@\w+)?\s*$", re.IGNORECASE)
+_VIDEO_CMD = re.compile(r"^/video(?:@\w+)?(?:\s+(.*))?$", re.DOTALL | re.IGNORECASE)
 
-SPEAK_BUTTON_MARKUP = {
-    "inline_keyboard": [[{"text": "🔊 השמע בקול", "callback_data": "speak"}]]
-}
+SPEAK_BUTTON = {"text": "🔊 השמע בקול", "callback_data": "speak"}
+VIDEO_BUTTON = {"text": "🎥 וידאו", "callback_data": "video"}
+SPEAK_BUTTON_MARKUP = {"inline_keyboard": [[SPEAK_BUTTON]]}
+SPEAK_AND_VIDEO_MARKUP = {"inline_keyboard": [[SPEAK_BUTTON, VIDEO_BUTTON]]}
+
+# Every generated video carries this caption: it shows a real person's face.
+VIDEO_CAPTION = "🎥 וידאו שנוצר בבינה מלאכותית — זה לא האדם עצמו."
+VIDEO_WELCOME_LINE = "\n• שולחים /video כדי לקבל כל תשובה גם כווידאו מדבר (או לוחצים 🎥 מתחת לתשובה)."
 
 WELCOME_MESSAGE = (
     "שלום למשפחה.\n"
@@ -151,10 +162,12 @@ def send_telegram_message(
     text: str,
     *,
     with_speak_button: bool = False,
+    with_video_button: bool = True,
 ) -> None:
     payload: dict[str, object] = {"chat_id": chat_id, "text": text}
     if with_speak_button:
-        payload["reply_markup"] = SPEAK_BUTTON_MARKUP
+        show_video = with_video_button and _video_enabled()
+        payload["reply_markup"] = SPEAK_AND_VIDEO_MARKUP if show_video else SPEAK_BUTTON_MARKUP
     with httpx.Client(timeout=20.0) as client:
         res = client.post(_tg_api_url("sendMessage"), json=payload)
         res.raise_for_status()
@@ -219,6 +232,19 @@ def send_telegram_voice(chat_id: int, audio_path: Path, caption: str = "") -> No
             ogg_path.unlink(missing_ok=True)
 
 
+def send_telegram_video(chat_id: int, video_path: Path, caption: str = VIDEO_CAPTION) -> None:
+    with httpx.Client(timeout=120.0) as client, video_path.open("rb") as f:
+        data: dict[str, str | int] = {"chat_id": chat_id, "supports_streaming": "true"}
+        if caption:
+            data["caption"] = caption[:1000]
+        res = client.post(
+            _tg_api_url("sendVideo"),
+            data=data,
+            files={"video": (video_path.name, f, "video/mp4")},
+        )
+        res.raise_for_status()
+
+
 def download_telegram_file(file_id: str, suffix: str = ".ogg") -> Path:
     """Download a Telegram voice/audio file into `voice_uploads_dir` for local transcription."""
     settings.voice_uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -254,6 +280,56 @@ def _speak_text_to_chat(chat_id: int, text: str) -> bool:
     return False
 
 
+def _video_enabled() -> bool:
+    """Video needs both the avatar sidecar switched on and synthesized speech allowed."""
+    return settings.avatar_video_enabled and settings.telegram_voice_replies != "off"
+
+
+def _run_in_background(fn: Callable[[], object]) -> None:
+    """Rendering takes tens of seconds; never block the polling loop or the webhook on it."""
+    threading.Thread(target=fn, name="telegram-video", daemon=True).start()
+
+
+VIDEO_FAILED_MESSAGE = "לא הצלחתי להכין וידאו הפעם — התשובה נשארת בטקסט."
+
+
+def _is_safety_reply(result: dict) -> bool:
+    """Crisis and declined-request replies come from the safety system, not the persona:
+    they must never be spoken by the person's face."""
+    return SAFETY_NOTE in (result.get("safety_notes") or [])
+
+
+def _send_video_to_chat(chat_id: int, text: str) -> bool:
+    """Synthesize `text`, render it as a talking-head video and send it. Returns True if sent."""
+    with _video_lock:
+        try:
+            send_chat_action(chat_id, "record_video")
+            tts_res = synthesize_speech(text)
+            audio_file = settings.audio_output_dir / tts_res["audio_filename"]
+            send_chat_action(chat_id, "record_video")
+            video_file = render_avatar_video(audio_file)
+            try:
+                send_chat_action(chat_id, "upload_video")
+                send_telegram_video(chat_id, video_file)
+            finally:
+                video_file.unlink(missing_ok=True)
+            return True
+        except (VoiceUnavailableError, VideoUnavailableError, ValueError) as e:
+            logger.info("Telegram video reply skipped ({})", e)
+        except Exception as e:  # noqa: BLE001 — a failed video leaves the text reply standing
+            logger.warning("Failed to send Telegram video reply ({})", type(e).__name__)
+    # The user was told a video is coming; don't leave them waiting.
+    try:
+        send_telegram_message(chat_id, VIDEO_FAILED_MESSAGE)
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _queue_video(chat_id: int, text: str) -> None:
+    _run_in_background(lambda: _send_video_to_chat(chat_id, text))
+
+
 def _reply_and_maybe_speak(chat_id: int, person_id: str, user_text: str, *, want_voice: bool) -> dict:
     session_id = _get_session_id(chat_id)
     send_chat_action(chat_id, "typing")
@@ -261,9 +337,21 @@ def _reply_and_maybe_speak(chat_id: int, person_id: str, user_text: str, *, want
     reply_text = result["reply"]
     _last_bot_reply[chat_id] = reply_text
 
-    auto_voice = want_voice or (chat_id in _voice_mode_chats) or (settings.telegram_voice_replies == "always")
-    show_button = not auto_voice and settings.telegram_voice_replies != "off"
-    send_telegram_message(chat_id, reply_text, with_speak_button=show_button)
+    videoable = not _is_safety_reply(result)
+    if not videoable:
+        _last_bot_reply.pop(chat_id, None)  # never replayed as video by a later /video
+
+    # The video carries the same speech, so video mode replaces the voice note.
+    auto_video = videoable and chat_id in _video_mode_chats and _video_enabled()
+    auto_voice = not auto_video and (
+        want_voice or (chat_id in _voice_mode_chats) or (settings.telegram_voice_replies == "always")
+    )
+    show_button = not (auto_voice or auto_video) and settings.telegram_voice_replies != "off"
+    send_telegram_message(chat_id, reply_text, with_speak_button=show_button, with_video_button=videoable)
+
+    if auto_video:
+        _queue_video(chat_id, reply_text)
+        return {"status": "ok", "voice_sent": False, "video_queued": True}
 
     voice_sent = _speak_text_to_chat(chat_id, reply_text) if auto_voice else False
     return {"status": "ok", "voice_sent": voice_sent}
@@ -277,7 +365,7 @@ def _handle_callback_query(cb: dict) -> dict:
     msg_id = msg.get("message_id")
     text = (msg.get("text") or "").strip()
 
-    if not isinstance(chat_id, int) or data != "speak" or not text:
+    if not isinstance(chat_id, int) or data not in ("speak", "video") or not text:
         if cb_id:
             _answer_callback_query(cb_id)
         return {"status": "ignored"}
@@ -287,6 +375,18 @@ def _handle_callback_query(cb: dict) -> dict:
             _answer_callback_query(cb_id, "נדרשת סיסמה משפחתית")
         return {"status": "unauthorized"}
 
+    if data == "video":
+        if not _video_enabled():
+            if cb_id:
+                _answer_callback_query(cb_id, "וידאו לא מופעל כרגע")
+            return {"status": "video_unavailable"}
+        if cb_id:
+            _answer_callback_query(cb_id, "מכין וידאו... זה לוקח כחצי דקה")
+        if isinstance(msg_id, int):
+            _clear_inline_keyboard(chat_id, msg_id)
+        _queue_video(chat_id, text)
+        return {"status": "ok", "video_queued": True}
+
     if cb_id:
         _answer_callback_query(cb_id, "מכין הקלטה קולית...")
     if isinstance(msg_id, int):
@@ -294,6 +394,45 @@ def _handle_callback_query(cb: dict) -> dict:
 
     sent = _speak_text_to_chat(chat_id, text)
     return {"status": "ok", "voice_sent": sent}
+
+
+def _handle_video_command(chat_id: int, person_id: str, inline_question: str) -> dict:
+    """`/video <question>` answers once as video; bare `/video` toggles video mode."""
+    if not _video_enabled():
+        send_telegram_message(chat_id, "וידאו לא מופעל בשרת הזה.")
+        return {"status": "video_unavailable"}
+
+    if inline_question:
+        session_id = _get_session_id(chat_id)
+        send_chat_action(chat_id, "typing")
+        result = chat_text(person_id=person_id, message=inline_question, session_id=session_id)
+        reply_text = result["reply"]
+        send_telegram_message(chat_id, reply_text)
+        if _is_safety_reply(result):
+            _last_bot_reply.pop(chat_id, None)
+            return {"status": "ok", "voice_sent": False}
+        _last_bot_reply[chat_id] = reply_text
+        _queue_video(chat_id, reply_text)
+        return {"status": "ok", "voice_sent": False, "video_queued": True}
+
+    if chat_id in _video_mode_chats:
+        _video_mode_chats.discard(chat_id)
+        send_telegram_message(chat_id, "מצב וידאו כובה — תשובות יישלחו בטקסט (אפשר ללחוץ 🎥 מתחת לכל הודעה).")
+        return {"status": "video_mode_off"}
+
+    if not video_info().available:
+        send_telegram_message(chat_id, "שרת הווידאו לא פועל כרגע. נסו שוב מאוחר יותר.")
+        return {"status": "video_unavailable"}
+
+    _video_mode_chats.add(chat_id)
+    last_reply = _last_bot_reply.get(chat_id, "")
+    if last_reply:
+        _queue_video(chat_id, last_reply)
+    send_telegram_message(
+        chat_id,
+        "מצב וידאו הופעל 🎥 — מעכשיו כל תשובה תישלח גם כווידאו מדבר (שלחו /video שוב כדי לכבות).",
+    )
+    return {"status": "video_mode_on", "video_queued": bool(last_reply)}
 
 
 def handle_telegram_update(update: dict) -> dict:
@@ -316,7 +455,7 @@ def handle_telegram_update(update: dict) -> dict:
         payload = (start_match.group(1) or "").strip()
         if try_authorize_chat(chat_id, payload):
             _get_session_id(chat_id, reset=True)
-            send_telegram_message(chat_id, WELCOME_MESSAGE)
+            send_telegram_message(chat_id, WELCOME_MESSAGE + (VIDEO_WELCOME_LINE if _video_enabled() else ""))
             return {"status": "authorized"}
         send_telegram_message(chat_id, AUTH_REQUIRED_MESSAGE)
         return {"status": "unauthorized"}
@@ -357,8 +496,12 @@ def handle_telegram_update(update: dict) -> dict:
             want_voice=settings.telegram_voice_replies in ("voice_only", "always"),
         )
 
-    # 2. Incoming text message or /voice command
+    # 2. Incoming text message, /video or /voice command
     if text:
+        video_cmd = _VIDEO_CMD.match(text)
+        if video_cmd:
+            return _handle_video_command(chat_id, person_id, (video_cmd.group(1) or "").strip())
+
         voice_cmd = _VOICE_CMD.match(text)
         if voice_cmd:
             inline_question = (voice_cmd.group(1) or "").strip()
@@ -429,16 +572,14 @@ def _configure_bot_profile() -> str:
         me = client.get(_tg_api_url("getMe")).json().get("result", {})
         username = str(me.get("username", ""))
         client.post(_tg_api_url("deleteWebhook"), json={"drop_pending_updates": False})
-        client.post(
-            _tg_api_url("setMyCommands"),
-            json={
-                "commands": [
-                    {"command": "start", "description": "התחלת שיחה (סימולציית זיכרון)"},
-                    {"command": "voice", "description": "השמעת התשובה והפעלה/כיבוי של קול אוטומטי"},
-                    {"command": "new", "description": "פתיחת שיחה חדשה ונקייה"},
-                ]
-            },
-        )
+        commands = [
+            {"command": "start", "description": "התחלת שיחה (סימולציית זיכרון)"},
+            {"command": "voice", "description": "השמעת התשובה והפעלה/כיבוי של קול אוטומטי"},
+            {"command": "new", "description": "פתיחת שיחה חדשה ונקייה"},
+        ]
+        if _video_enabled():
+            commands.insert(2, {"command": "video", "description": "הפעלה/כיבוי של תשובות בווידאו מדבר"})
+        client.post(_tg_api_url("setMyCommands"), json={"commands": commands})
         return username
 
 

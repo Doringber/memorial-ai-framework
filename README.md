@@ -286,6 +286,26 @@ Family members can chat with the memorial bot directly from Telegram on iOS, And
    - Sending a voice note (or `/voice <message>`) replies with both text and voice automatically.
    - Sending `/voice` by itself reads the last reply aloud and toggles automatic voice mode on/off.
    - When `FAMILY_ACCESS_KEY` is set in `.env`, strangers are blocked until they send `/start <FAMILY_ACCESS_KEY>` once.
+5. **Talking-head video (optional, Apple Silicon):** with the [avatar sidecar](apps/avatar-sidecar/README.md) running and `AVATAR_VIDEO_ENABLED=true`:
+   - A **`🎥 וידאו`** button appears next to `🔊` — tap it to get that reply as a lip-synced video of the person's portrait, spoken in the configured voice.
+   - `/video` toggles video mode (every reply also arrives as video); `/video <message>` answers once as video.
+   - The text reply is sent immediately; the video follows when rendered (about 10 minutes per 27 s of reply with the full quality passes on an M-series Mac), always captioned as AI-generated.
+
+---
+
+## Talking-Head Video (Optional)
+
+[`apps/avatar-sidecar`](apps/avatar-sidecar/README.md) renders each spoken reply as a short lip-synced video from **one portrait photo** using [AvatarForcing](https://github.com/TaekyungKi/AvatarForcing) (CVPR 2026) via [avatarforcing-mlx](https://github.com/johnrobinsn/avatarforcing-mlx). It runs as a separate local process with its own environment, keeps the model and portrait loaded, and only listens on `127.0.0.1`.
+
+```
+reply text → TTS (mp3) → API ──POST /render──► avatar sidecar ──► mp4 → Telegram
+```
+
+**Example** (AI-generated demo, synthesized voice, full quality: MuseTalk mouth + GFPGAN face):
+
+<video src="docs/talking-head-demo.mp4" controls width="320"></video>
+
+> **License:** AvatarForcing and its weights are **CC BY-NC 4.0 / BY-NC-ND 4.0 — non-commercial use only.** They are not part of this MIT repository; the sidecar installs them from their own sources.
 
 ---
 
@@ -349,12 +369,15 @@ Verifies login, AI simulation banner, streaming text replies, audio playback, mi
 | `ELEVENLABS_MONTHLY_CHAR_LIMIT` | `20000` | Hard local monthly character cap; falls back to text-only when reached. |
 | `FAMILY_ACCESS_KEY` | *(empty)* | Shared password for family chat access (Web & Telegram `/start <key>`). |
 | `ADMIN_ACCESS_KEY` | *(empty)* | Admin password for `/admin` uploads, WhatsApp ingestion, and webhook setup. |
+| `AVATAR_VIDEO_ENABLED` | `false` | Talking-head video replies in Telegram (needs a working TTS and the avatar sidecar). |
+| `AVATAR_SERVICE_URL` | `http://127.0.0.1:8090` | Avatar sidecar address. Must be this machine unless `ALLOW_EXTERNAL_SERVICES=true`. |
+| `AVATAR_VIDEO_MAX_SECONDS` | `60` | Longer replies are cut to this length before rendering. |
 
 ---
 
 ## Ethical & Safety Guardrails
 
-1. **Always-On Simulation Notice:** The UI header, empty state, message headers (`(סימולציה)`), and Telegram `/start` message explicitly state that responses and audio are AI-generated simulations.
+1. **Always-On Simulation Notice:** The UI header, empty state, message headers (`(סימולציה)`), and Telegram `/start` message explicitly state that responses and audio are AI-generated simulations. Every talking-head video is sent with an AI-generated caption.
 2. **Grief & Crisis Intervention (`app/services/safety.py`):** Any message expressing self-harm or a wish to "join" the deceased bypasses the LLM and returns immediate human helpline resources (ERAN `1201`, Sahar).
 3. **No Financial, Legal, or Third-Party Impersonation:** Requests involving wills, inheritance, passwords, or authoring messages to others are refused outside the persona voice.
 4. **Authentic Voice Provenance:** `scripts/clone_voice.py` and `scripts/compare_voices.py` never feed synthetic TTS outputs back as training data.
